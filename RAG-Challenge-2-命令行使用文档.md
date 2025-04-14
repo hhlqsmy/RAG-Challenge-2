@@ -47,14 +47,14 @@ python main.py parse-pdfs [选项]
 
 **示例：**
 ```bash
-# 使用默认设置（并行模式）
-python main.py parse-pdfs
+# 使用默认设置（并行模式）,到 data/test_set/目录下执行
+python ../../main.py parse-pdfs
 
 # 使用顺序处理模式
-python main.py parse-pdfs --sequential
+python ../../main.py parse-pdfs --sequential
 
 # 自定义并行处理参数
-python main.py parse-pdfs --parallel --chunk-size=3 --max-workers=8
+python ../../main.py parse-pdfs --parallel --chunk-size=3 --max-workers=8
 ```
 
 #### 3. 表格序列化
@@ -186,4 +186,8 @@ python main.py process-questions --config=max_nst_o3m
 OPENAI_API_KEY=your_openai_api_key
 IBM_API_KEY=your_ibm_api_key
 GEMINI_API_KEY=your_gemini_api_key
-``` 
+```
+
+# 在文件顶部添加
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context 

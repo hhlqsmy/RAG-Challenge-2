@@ -11,6 +11,7 @@ from rank_bm25 import BM25Okapi
 import faiss
 import numpy as np
 from tenacity import retry, wait_fixed, stop_after_attempt
+import requests
 
 
 class BM25Ingestor:
@@ -63,19 +64,31 @@ class VectorDBIngestor:
         return llm
 
     @retry(wait=wait_fixed(20), stop=stop_after_attempt(2))
-    def _get_embeddings(self, text: Union[str, List[str]], model: str = "text-embedding-3-large") -> List[float]:
+    def _get_embeddings(self, text: Union[str, List[str]], model: str = "bge-m3") -> List[float]:
         if isinstance(text, str) and not text.strip():
             raise ValueError("Input text cannot be an empty string.")
         
-        if isinstance(text, list):
-            text_chunks = [text[i:i + 1024] for i in range(0, len(text), 1024)]
-        else:
-            text_chunks = [text]
-
+        url = "http://192.168.201.14:8000/v1/embeddings"
+        
+        if isinstance(text, str):
+            text = [text]
+            
         embeddings = []
-        for chunk in text_chunks:
-            response = self.llm.embeddings.create(input=chunk, model=model)
-            embeddings.extend([embedding.embedding for embedding in response.data])
+        for chunk in text:
+            payload = {
+                "model": model,
+                "input": chunk
+            }
+            
+            try:
+                response = requests.post(url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                embeddings.append(data["data"][0]["embedding"])
+            except Exception as e:
+                print(f"嵌入请求出错: {e}")
+                print(f"请求内容: {payload}")
+                raise
         
         return embeddings
 

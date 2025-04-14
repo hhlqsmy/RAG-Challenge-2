@@ -5,6 +5,8 @@ import logging
 import os
 import json
 import pandas as pd
+import time
+from datetime import datetime
 
 from src.pdf_parsing import PDFParser
 from src.parsed_reports_merging import PageTextPreparation
@@ -61,14 +63,31 @@ class RunConfig:
     answering_model: str = "gpt-4o-mini-2024-07-18" #or "gpt-4o-2024-08-06"
     config_suffix: str = ""
 
+# 配置日志格式
+def setup_logging(log_level=logging.INFO):
+    """设置日志配置"""
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    logging.basicConfig(
+        level=log_level,
+        format=log_format,
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        ]
+    )
+    return logging.getLogger('pipeline')
+
 class Pipeline:
     def __init__(self, root_path: Path, subset_name: str = "subset.csv", questions_file_name: str = "questions.json", pdf_reports_dir_name: str = "pdf_reports", run_config: RunConfig = RunConfig()):
+        self.logger = setup_logging()
+        self.logger.info(f"初始化Pipeline，运行配置: {run_config}")
         self.run_config = run_config
         self.paths = self._initialize_paths(root_path, subset_name, questions_file_name, pdf_reports_dir_name)
         self._convert_json_to_csv_if_needed()
 
     def _initialize_paths(self, root_path: Path, subset_name: str, questions_file_name: str, pdf_reports_dir_name: str) -> PipelineConfig:
         """Initialize paths configuration based on run config settings"""
+        self.logger.debug(f"初始化路径配置，root_path: {root_path}")
         return PipelineConfig(
             root_path=root_path,
             subset_name=subset_name,
@@ -87,6 +106,7 @@ class Pipeline:
         csv_path = self.paths.root_path / "subset.csv"
         
         if json_path.exists() and not csv_path.exists():
+            self.logger.info(f"发现subset.json但未找到subset.csv，正在转换格式")
             try:
                 with open(json_path, 'r') as f:
                     data = json.load(f)
@@ -94,29 +114,35 @@ class Pipeline:
                 df = pd.DataFrame(data)
                 
                 df.to_csv(csv_path, index=False)
+                self.logger.info(f"JSON转CSV成功: {csv_path}")
                 
             except Exception as e:
-                print(f"Error converting JSON to CSV: {str(e)}")
+                self.logger.error(f"JSON转CSV出错: {str(e)}", exc_info=True)
 
-# Docling automatically downloads some models from huggingface when first used
-# I wanted to download them prior to running the pipeline and created this crutch
     @staticmethod
     def download_docling_models(): 
-        logging.basicConfig(level=logging.DEBUG)
+        logger = setup_logging()
+        logger.info("开始下载docling模型")
+        start_time = time.time()
         parser = PDFParser(output_dir=here())
         parser.parse_and_export(input_doc_paths=[here() / "src/dummy_report.pdf"])
+        logger.info(f"docling模型下载完成，耗时: {time.time() - start_time:.2f}秒")
 
     def parse_pdf_reports_sequential(self):
-        logging.basicConfig(level=logging.DEBUG)
+        self.logger.info("开始顺序解析PDF报告")
+        start_time = time.time()
         
         pdf_parser = PDFParser(
             output_dir=self.paths.parsed_reports_path,
             csv_metadata_path=self.paths.subset_path
         )
         pdf_parser.debug_data_path = self.paths.parsed_reports_debug_path
-            
+        
+        self.logger.info(f"解析目标目录: {self.paths.pdf_reports_dir}")    
         pdf_parser.parse_and_export(doc_dir=self.paths.pdf_reports_dir)
-        print(f"PDF reports parsed and saved to {self.paths.parsed_reports_path}")
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"PDF报告解析完成，保存至 {self.paths.parsed_reports_path}，耗时: {elapsed_time:.2f}秒")
 
     def parse_pdf_reports_parallel(self, chunk_size: int = 2, max_workers: int = 10):
         """Parse PDF reports in parallel using multiple processes.
@@ -125,7 +151,8 @@ class Pipeline:
             chunk_size: Number of PDFs to process in each worker
             num_workers: Number of parallel worker processes to use
         """
-        logging.basicConfig(level=logging.DEBUG)
+        self.logger.info(f"开始并行解析PDF报告，分块大小: {chunk_size}，最大工作进程: {max_workers}")
+        start_time = time.time()
         
         pdf_parser = PDFParser(
             output_dir=self.paths.parsed_reports_path,
@@ -134,74 +161,117 @@ class Pipeline:
         pdf_parser.debug_data_path = self.paths.parsed_reports_debug_path
 
         input_doc_paths = list(self.paths.pdf_reports_dir.glob("*.pdf"))
+        self.logger.info(f"找到{len(input_doc_paths)}个PDF文件待处理")
         
         pdf_parser.parse_and_export_parallel(
             input_doc_paths=input_doc_paths,
             optimal_workers=max_workers,
             chunk_size=chunk_size
         )
-        print(f"PDF reports parsed and saved to {self.paths.parsed_reports_path}")
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"PDF报告并行解析完成，保存至 {self.paths.parsed_reports_path}，耗时: {elapsed_time:.2f}秒")
 
     def serialize_tables(self, max_workers: int = 10):
         """Process tables in files using parallel threading"""
+        self.logger.info(f"开始序列化表格，最大工作线程: {max_workers}")
+        start_time = time.time()
+        
         serializer = TableSerializer()
+        
+        file_count = len(list(self.paths.parsed_reports_path.glob("*.json")))
+        self.logger.info(f"发现{file_count}个文件需要处理")
+        
         serializer.process_directory_parallel(
             self.paths.parsed_reports_path,
             max_workers=max_workers
         )
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"表格序列化完成，耗时: {elapsed_time:.2f}秒")
 
     def merge_reports(self):
         """Merge complex JSON reports into a simpler structure with a list of pages, where all text blocks are combined into a single string."""
+        self.logger.info("开始合并报告文件")
+        start_time = time.time()
+        
         ptp = PageTextPreparation(use_serialized_tables=self.run_config.use_serialized_tables)
-        _ = ptp.process_reports(
+        self.logger.info(f"使用序列化表格: {self.run_config.use_serialized_tables}")
+        
+        result = ptp.process_reports(
             reports_dir=self.paths.parsed_reports_path,
             output_dir=self.paths.merged_reports_path
         )
-        print(f"Reports saved to {self.paths.merged_reports_path}")
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"报告合并完成，处理了{len(result)}个文件，保存至 {self.paths.merged_reports_path}，耗时: {elapsed_time:.2f}秒")
 
     def export_reports_to_markdown(self):
         """Export processed reports to markdown format for review."""
+        self.logger.info("开始导出报告至Markdown格式")
+        start_time = time.time()
+        
         ptp = PageTextPreparation(use_serialized_tables=self.run_config.use_serialized_tables)
+        
         ptp.export_to_markdown(
             reports_dir=self.paths.parsed_reports_path,
             output_dir=self.paths.reports_markdown_path
         )
-        print(f"Reports saved to {self.paths.reports_markdown_path}")
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"报告导出至Markdown完成，保存至 {self.paths.reports_markdown_path}，耗时: {elapsed_time:.2f}秒")
 
     def chunk_reports(self, include_serialized_tables: bool = False):
         """Split processed reports into smaller chunks for better processing."""
+        self.logger.info(f"开始分块报告，包含序列化表格: {include_serialized_tables}")
+        start_time = time.time()
+        
         text_splitter = TextSplitter()
         
         serialized_tables_dir = None
         if include_serialized_tables:
             serialized_tables_dir = self.paths.parsed_reports_path
+            self.logger.info(f"使用序列化表格目录: {serialized_tables_dir}")
         
         text_splitter.split_all_reports(
             self.paths.merged_reports_path,
             self.paths.documents_dir,
             serialized_tables_dir
         )
-        print(f"Chunked reports saved to {self.paths.documents_dir}")
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"报告分块完成，保存至 {self.paths.documents_dir}，耗时: {elapsed_time:.2f}秒")
 
     def create_vector_dbs(self):
         """Create vector databases from chunked reports."""
+        self.logger.info("开始创建向量数据库")
+        start_time = time.time()
+        
         input_dir = self.paths.documents_dir
         output_dir = self.paths.vector_db_dir
         
         vdb_ingestor = VectorDBIngestor()
         vdb_ingestor.process_reports(input_dir, output_dir)
-        print(f"Vector databases created in {output_dir}")
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"向量数据库创建完成，保存至 {output_dir}，耗时: {elapsed_time:.2f}秒")
     
     def create_bm25_db(self):
         """Create BM25 database from chunked reports."""
+        self.logger.info("开始创建BM25数据库")
+        start_time = time.time()
+        
         input_dir = self.paths.documents_dir
         output_file = self.paths.bm25_db_path
         
         bm25_ingestor = BM25Ingestor()
         bm25_ingestor.process_reports(input_dir, output_file)
-        print(f"BM25 database created at {output_file}")
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"BM25数据库创建完成，保存至 {output_file}，耗时: {elapsed_time:.2f}秒")
     
     def parse_pdf_reports(self, parallel: bool = True, chunk_size: int = 2, max_workers: int = 10):
+        self.logger.info(f"开始解析PDF报告，并行处理: {parallel}")
         if parallel:
             self.parse_pdf_reports_parallel(chunk_size=chunk_size, max_workers=max_workers)
         else:
@@ -214,21 +284,23 @@ class Pipeline:
         3. Chunk the reports
         4. Create vector databases
         """
-        print("Starting reports processing pipeline...")
+        self.logger.info("开始处理已解析的PDF报告")
+        start_time = time.time()
         
-        print("Step 1: Merging reports...")
+        self.logger.info("第1步: 合并报告...")
         self.merge_reports()
         
-        print("Step 2: Exporting reports to markdown...")
+        self.logger.info("第2步: 导出报告至Markdown...")
         self.export_reports_to_markdown()
         
-        print("Step 3: Chunking reports...")
+        self.logger.info("第3步: 分块报告...")
         self.chunk_reports()
         
-        print("Step 4: Creating vector databases...")
+        self.logger.info("第4步: 创建向量数据库...")
         self.create_vector_dbs()
         
-        print("Reports processing pipeline completed successfully!")
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"报告处理管道完成，总耗时: {elapsed_time:.2f}秒")
         
     def _get_next_available_filename(self, base_path: Path) -> Path:
         """
@@ -248,10 +320,22 @@ class Pipeline:
             new_path = parent / new_filename
             
             if not new_path.exists():
+                self.logger.debug(f"生成新的可用文件名: {new_path}")
                 return new_path
             counter += 1
 
     def process_questions(self):
+        self.logger.info("开始处理问题")
+        start_time = time.time()
+        
+        self.logger.info(f"配置详情: 父文档检索={self.run_config.parent_document_retrieval}, " +
+                         f"LLM重排={self.run_config.llm_reranking}, " + 
+                         f"重排样本大小={self.run_config.llm_reranking_sample_size}, " +
+                         f"检索Top-N={self.run_config.top_n_retrieval}, " +
+                         f"并行请求数={self.run_config.parallel_requests}, " +
+                         f"API提供商={self.run_config.api_provider}, " +
+                         f"回答模型={self.run_config.answering_model}")
+        
         processor = QuestionsProcessor(
             vector_db_dir=self.paths.vector_db_dir,
             documents_dir=self.paths.documents_dir,
@@ -269,15 +353,19 @@ class Pipeline:
         )
         
         output_path = self._get_next_available_filename(self.paths.answers_file_path)
+        self.logger.info(f"答案将保存至: {output_path}")
         
-        _ = processor.process_all_questions(
+        result = processor.process_all_questions(
             output_path=output_path,
             submission_file=self.run_config.submission_file,
             team_email=self.run_config.team_email,
             submission_name=self.run_config.submission_name,
             pipeline_details=self.run_config.pipeline_details
         )
-        print(f"Answers saved to {output_path}")
+        
+        elapsed_time = time.time() - start_time
+        self.logger.info(f"问题处理完成，处理了{len(result)}个问题，总耗时: {elapsed_time:.2f}秒，平均每个问题: {elapsed_time/max(1, len(result)):.2f}秒")
+        self.logger.info(f"答案已保存至 {output_path}")
 
 
 preprocess_configs = {"ser_tab": RunConfig(use_serialized_tables=True),
